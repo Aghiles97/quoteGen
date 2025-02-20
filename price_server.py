@@ -1,11 +1,11 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template
 import json
 import csv
 import os
 from datetime import datetime
 import io
 
-app = Flask(__name__)
+app = Flask(__name__, template_folder='.')
 
 # Configuration
 PRODUCTS_FILE = 'server_products.csv'
@@ -178,5 +178,28 @@ def handle_prices():
 def health_check():
     return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()}), 200
 
+
+@app.route('/debug', methods=['GET'])
+def debug_view():
+    products = []
+    prices = {}
+    
+    # Load products
+    products_path = get_file_path(PRODUCTS_FILE)
+    if os.path.exists(products_path):
+        with open(products_path, 'r', encoding='utf-8', newline='') as f:
+            reader = csv.reader(f, quoting=csv.QUOTE_ALL, escapechar='\\')
+            products = list(reader)[1:]  # Skip header
+    
+    # Load prices
+    prices_path = get_file_path(PRICES_FILE)
+    if os.path.exists(prices_path):
+        with open(prices_path, 'r') as f:
+            prices = json.load(f)
+    
+    return render_template('index.html', products=products, prices=prices)
+
+
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', debug=True)
+    # Run the server on port 5001 to avoid conflicts with common development ports
+    app.run(host='0.0.0.0', port=5001, debug=True)
