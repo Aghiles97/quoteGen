@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Price Server Debug</title>
+    <style>
+      table {
+        border-collapse: collapse;
+        width: 100%;
+      }
+      th,
+      td {
+        border: 1px solid #ddd;
+        padding: 8px;
+        text-align: left;
+      }
+      th {
+        background-color: #f2f2f2;
+      }
+      .container {
+        margin: 20px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Price Server Debug Interface</h1>
+
+      <h2>Products</h2>
+      <table>
+        <tr>
+          <th>ID</th>
+          <th>Name</th>
+          <th>Description</th>
+          <th>Photo</th>
+        </tr>
+        {% for product in products %}
+        <tr>
+          <td>{{ product[0] }}</td>
+          <td>{{ product[1] }}</td>
+          <td>{{ product[2] }}</td>
+          <td>{{ product[3] }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+
+      <h2>Prices</h2>
+      <table>
+        <tr>
+          <th>Product ID</th>
+          <th>Name</th>
+          <th>Current Price</th>
+          <th>Price History</th>
+        </tr>
+        {% for id, data in prices.items() %}
+        <tr>
+          <td>{{ id }}</td>
+          <td>{{ data.name }}</td>
+          <td>${{ "%.2f"|format(data.price) }}</td>
+          <td>
+            <ul>
+              {% for entry in data.history %}
+              <li>${{ "%.2f"|format(entry.price) }} ({{ entry.date }})</li>
+              {% endfor %}
+            </ul>
+          </td>
+        </tr>
+        {% endfor %}
+      </table>
+    </div>
+  </body>
+</html>
