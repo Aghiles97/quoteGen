@@ -4,13 +4,25 @@ import csv
 import os
 from datetime import datetime
 import io
+import pandas as pd
+import shutil
 
 app = Flask(__name__, template_folder='.')
 
-# Configuration
-PRODUCTS_FILE = 'server_products.csv'
-PRICES_FILE = 'server_prices.json'
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, 'server_data')
+
+if not os.path.exists(DATA_DIR):
+    os.makedirs(DATA_DIR)
+
+PRODUCTS_FILE = os.path.join(DATA_DIR, 'products.csv')
+PRICES_FILE = os.path.join(DATA_DIR, 'product_prices.json')
+HISTORY_FILE = os.path.join(DATA_DIR, 'quotation_history.json')
+STATUS_FILE = os.path.join(DATA_DIR, 'quotation_status.json')
+ANALYTICS_FILE = os.path.join(DATA_DIR, 'analytics.json')
 DATA_DIR = 'server_data'
+
 
 # Ensure data directory exists
 if not os.path.exists(DATA_DIR):
@@ -19,6 +31,30 @@ if not os.path.exists(DATA_DIR):
 def get_file_path(filename):
     return os.path.join(DATA_DIR, filename)
 
+# Add new file type handling function
+def handle_json_file(file_name, data=None):
+    file_path = get_file_path(file_name)
+    if data:  # POST request
+        # Add validation for empty data structures
+        if isinstance(data, dict) and not data:
+            raise ValueError(f"Empty dictionary received for {file_name}")
+        if isinstance(data, list) and not data:
+            raise ValueError(f"Empty list received for {file_name}")
+            
+        # Validate specific file types
+        if file_name == ANALYTICS_FILE and (not isinstance(data, list) or not data):
+            raise ValueError("Analytics data must be a non-empty list")
+            
+        with open(file_path, 'w') as f:
+            json.dump(data, f, indent=2)
+    else:  # GET request
+        if not os.path.exists(file_path):
+            with open(file_path, 'w') as f:
+                json.dump({}, f)
+            return {}
+        with open(file_path, 'r') as f:
+            return json.load(f)
+        
 # Products endpoints
 @app.route('/products', methods=['GET', 'POST'])
 def handle_products():
@@ -107,6 +143,54 @@ def handle_products():
         except Exception as e:
             return jsonify({'message': f'Server error: {str(e)}'}), 500
 
+@app.route('/products/<product_id>', methods=['POST'])
+def update_single_product(product_id):
+    """Update a single product by ID"""
+    try:
+        # Get the product data from request
+        product_data = request.get_json()
+        if not product_data:
+            return jsonify({'message': 'No product data provided'}), 400
+
+        # Load existing products
+        products = []
+        if os.path.exists(PRODUCTS_FILE):
+            df = pd.read_csv(PRODUCTS_FILE, quoting=csv.QUOTE_ALL, escapechar='\\', encoding='utf-8')
+            products = df.values.tolist()
+
+        # Find and update the product
+        product_updated = False
+        for i, product in enumerate(products):
+            if product[0] == product_id:
+                products[i] = [
+                    product_id,
+                    product_data['name'],
+                    product_data['description'],
+                    product_data['photo']
+                ]
+                product_updated = True
+                break
+
+        if not product_updated:
+            return jsonify({'message': 'Product not found'}), 404
+
+        # Save updated products back to CSV
+        df = pd.DataFrame(products, columns=['ID', 'Name', 'Description', 'Photo'])
+        df.to_csv(PRODUCTS_FILE, index=False, quoting=csv.QUOTE_ALL, escapechar='\\', encoding='utf-8')
+
+        return jsonify({
+            'message': 'Product updated successfully',
+            'product': {
+                'id': product_id,
+                'name': product_data['name'],
+                'description': product_data['description'],
+                'photo': product_data['photo']
+            }
+        }), 200
+
+    except Exception as e:
+        return jsonify({'message': f'Error updating product: {str(e)}'}), 500
+    
 # Prices endpoints
 @app.route('/prices', methods=['GET', 'POST'])
 def handle_prices():
@@ -118,7 +202,6 @@ def handle_prices():
             price_data = request.get_json()
             if not price_data:
                 return jsonify({'message': 'No price data provided'}), 400
-            
             # Load existing prices
             existing_prices = {}
             if os.path.exists(file_path):
@@ -131,19 +214,38 @@ def handle_prices():
                     existing_prices[product_id] = {
                         'name': data.get('name', ''),
                         'price': data.get('price', 0),
-                        'history': []
+                        'history': data.get('history', []),  # Preserve incoming history
+                        'last_modified': data.get('last_modified', datetime.now().strftime('%Y-%m-%d %H:%M'))
                     }
-                
-                current_price = existing_prices[product_id].get('price', 0)
-                if current_price != data.get('price', 0):
-                    # Add to history only if price changed
-                    history_entry = {
-                        'price': data.get('price', 0),
-                        'date': datetime.now().strftime('%Y-%m-%d %H:%M')
-                    }
-                    existing_prices[product_id]['history'].append(history_entry)
-                    existing_prices[product_id]['price'] = data.get('price', 0)
-                    existing_prices[product_id]['name'] = data.get('name', '')
+                else:
+                    current_price = existing_prices[product_id].get('price', 0)
+                    if current_price != data.get('price', 0):
+                        # Add to history only if price changed
+                        history_entry = {
+                            'price': data.get('price', 0),
+                            'date': datetime.now().strftime('%Y-%m-%d %H:%M')
+                        }
+                        # Merge existing history with incoming history
+                        existing_history = existing_prices[product_id].get('history', [])
+                        incoming_history = data.get('history', [])
+                        merged_history = list({(entry.get('date'), entry.get('price')): entry 
+                                            for entry in existing_history + incoming_history}.values())
+                        merged_history.append(history_entry)
+                        
+                        existing_prices[product_id].update({
+                            'price': data.get('price', 0),
+                            'name': data.get('name', ''),
+                            'history': merged_history,
+                            'last_modified': datetime.now().strftime('%Y-%m-%d %H:%M')
+                        })
+                    else:
+                        # Only update name and preserve existing history if price hasn't changed
+                        existing_prices[product_id]['name'] = data.get('name', '')
+                        existing_prices[product_id]['history'] = (
+                            data.get('history', existing_prices[product_id].get('history', []))
+                        )
+                        if 'last_modified' in data:
+                            existing_prices[product_id]['last_modified'] = data['last_modified']
             
             # Save updated prices
             with open(file_path, 'w') as f:
@@ -164,7 +266,6 @@ def handle_prices():
                 
             with open(file_path, 'r') as f:
                 prices = json.load(f)
-                print("Sending prices from server:", json.dumps(prices, indent=2))  # Debug print
             
             # Return the entire prices dictionary including history
             return jsonify(prices), 200
@@ -173,33 +274,303 @@ def handle_prices():
             print(f"Error in GET /prices: {str(e)}")  # Debug print
             return jsonify({'message': f'Server error: {str(e)}'}), 500
 
+
+@app.route('/products/<product_id>', methods=['DELETE'])
+def delete_product(product_id):
+    products_path = get_file_path(PRODUCTS_FILE)
+    try:
+        # Read existing products
+        products = []
+        with open(products_path, 'r', encoding='utf-8', newline='') as f:
+            reader = csv.reader(f, quoting=csv.QUOTE_ALL, escapechar='\\')
+            products = list(reader)
+            
+        # Find and remove the product
+        header = products[0]
+        filtered_products = [row for row in products[1:] if row[0] != product_id]
+        
+        # Write back the filtered products
+        with open(products_path, 'w', encoding='utf-8', newline='') as f:
+            writer = csv.writer(f, quoting=csv.QUOTE_ALL, escapechar='\\')
+            writer.writerow(header)
+            writer.writerows(filtered_products)
+            
+        return jsonify({'message': 'Product deleted successfully'}), 200
+    except Exception as e:
+        return jsonify({'message': f'Error deleting product: {str(e)}'}), 500
+
+
+@app.route('/prices/<product_id>', methods=['POST'])
+def update_single_price(product_id):
+    try:
+        # Load current prices
+        prices_path = get_file_path(PRICES_FILE)
+        with open(prices_path, 'r') as f:
+            prices = json.load(f)
+        
+        # Update single product price
+        prices[product_id] = request.json
+        
+        # Save updated prices
+        with open(prices_path, 'w') as f:
+            json.dump(prices, f, indent=2)
+            
+        return jsonify({'message': 'Price updated successfully'}), 200
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/prices/<product_id>', methods=['DELETE'])
+def delete_price(product_id):
+    prices_path = get_file_path(PRICES_FILE)
+    try:
+        # Read existing prices
+        with open(prices_path, 'r') as f:
+            prices = json.load(f)
+            
+        # Remove price if exists
+        if product_id in prices:
+            del prices[product_id]
+            
+            # Write back updated prices
+            with open(prices_path, 'w') as f:
+                json.dump(prices, f, indent=2)
+                
+            return jsonify({'message': 'Price deleted successfully'}), 200
+        else:
+            return jsonify({'message': 'Price not found'}), 404
+    except Exception as e:
+        return jsonify({'message': f'Error deleting price: {str(e)}'}), 500
+    
+
 # Health check endpoint
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()}), 200
+@app.route('/history', methods=['GET', 'POST'])
+def handle_history():
+    try:
+        if request.method == 'POST':
+            data = request.get_json()
+            if not data:
+                return jsonify({'message': 'No history data provided'}), 400
+            handle_json_file(HISTORY_FILE, data)
+            return jsonify({'message': 'History updated successfully'}), 200
+        else:
+            history = handle_json_file(HISTORY_FILE)
+            return jsonify(history), 200
+    except Exception as e:
+        return jsonify({'message': f'Server error: {str(e)}'}), 500
+
+@app.route('/status', methods=['GET', 'POST'])
+def handle_status():
+    try:
+        if request.method == 'POST':
+            data = request.get_json()
+            print(data)
+            if not data:
+                return jsonify({'message': 'No status data provided'}), 400
+            handle_json_file(STATUS_FILE, data)
+            return jsonify({'message': 'Status updated successfully'}), 200
+        else:
+            status = handle_json_file(STATUS_FILE)
+            return jsonify(status), 200
+    except Exception as e:
+        return jsonify({'message': f'Server error: {str(e)}'}), 500
+
+@app.route('/analytics', methods=['GET', 'POST'])
+def handle_analytics():
+    try:
+        if request.method == 'POST':
+            data = request.get_json()
+            if not data:
+                return jsonify({'message': 'No analytics data provided'}), 400
+            try:
+                handle_json_file(ANALYTICS_FILE, data)
+                return jsonify({'message': 'Analytics updated successfully'}), 200
+            except ValueError as e:
+                return jsonify({'message': str(e)}), 400
+        else:
+            analytics = handle_json_file(ANALYTICS_FILE)
+            return jsonify(analytics), 200
+    except Exception as e:
+        return jsonify({'message': f'Server error: {str(e)}'}), 500
 
 
+# Add this after your other route definitions
+
+@app.route('/quotes', methods=['GET', 'POST'])
+def handle_quotes():
+    """Handle quotes data"""
+    try:
+        if request.method == 'POST':
+            new_quotes = request.get_json()
+            if not new_quotes:
+                return jsonify({'message': 'No quotes data provided'}), 400
+                
+            # Load existing quotes
+            existing_quotes = {}
+            if os.path.exists(STATUS_FILE):
+                with open(STATUS_FILE, 'r', encoding='utf-8') as f:
+                    existing_quotes = json.load(f)
+            
+            # Merge new quotes with existing ones
+            existing_quotes.update(new_quotes)
+                
+            # Save merged quotes
+            with open(STATUS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(existing_quotes, f, indent=2)
+            
+            return jsonify({'message': 'Quotes updated successfully'}), 200
+            
+        else:  # GET request
+            if not os.path.exists(STATUS_FILE):
+                # Initialize empty quotes file if it doesn't exist
+                with open(STATUS_FILE, 'w', encoding='utf-8') as f:
+                    json.dump({}, f)
+                return jsonify({}), 200
+                
+            # Return quotes data from quotation_status.json
+            with open(STATUS_FILE, 'r', encoding='utf-8') as f:
+                quotes = json.load(f)
+            return jsonify(quotes), 200
+            
+    except Exception as e:
+        print(f"Error in handle_quotes: {str(e)}")  # Debug print
+        return jsonify({'message': f'Server error: {str(e)}'}), 500
+    
+@app.route('/quotes/<quote_id>', methods=['DELETE'])
+def delete_quote(quote_id):
+    """Delete a specific quote from status, history and analytics"""
+    try:
+        # Load data from all files
+        status_data = {}
+        history_data = []
+        analytics_data = []
+        
+        if os.path.exists(STATUS_FILE):
+            with open(STATUS_FILE, 'r', encoding='utf-8') as f:
+                status_data = json.load(f)
+                
+        if os.path.exists(HISTORY_FILE):
+            with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+                history_data = json.load(f)
+                
+        if os.path.exists(ANALYTICS_FILE):
+            with open(ANALYTICS_FILE, 'r', encoding='utf-8') as f:
+                analytics_data = json.load(f)
+        
+        # Check if quote exists
+        if quote_id not in status_data:
+            return jsonify({'message': 'Quote not found'}), 404
+            
+        # Get the quote date for filtering history and analytics
+        quote_date = status_data[quote_id]['date']
+        
+        # Delete from status
+        del status_data[quote_id]
+        
+        # Filter out from history
+        history_data = [h for h in history_data if h['date'] != quote_date]
+        
+        # Filter out from analytics
+        analytics_data = [a for a in analytics_data if a['date'] != quote_date]
+        
+        # Save all updated data
+        with open(STATUS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(status_data, f, indent=2)
+            
+        with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
+            json.dump(history_data, f, indent=2)
+            
+        with open(ANALYTICS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(analytics_data, f, indent=2)
+            
+        return jsonify({
+            'message': 'Quote deleted successfully from all records',
+            'quote_id': quote_id
+        }), 200
+        
+    except Exception as e:
+        print(f"Error deleting quote: {str(e)}")  # Debug print
+        return jsonify({
+            'message': f'Server error while deleting quote: {str(e)}',
+            'quote_id': quote_id
+        }), 500
+    
+# Update debug view to show all files
 @app.route('/debug', methods=['GET'])
 def debug_view():
-    products = []
-    prices = {}
+    data = {
+        'products': [],
+        'prices': {},
+        'history': {},
+        'status': {},
+        'analytics': {}
+    }
     
     # Load products
     products_path = get_file_path(PRODUCTS_FILE)
     if os.path.exists(products_path):
         with open(products_path, 'r', encoding='utf-8', newline='') as f:
             reader = csv.reader(f, quoting=csv.QUOTE_ALL, escapechar='\\')
-            products = list(reader)[1:]  # Skip header
+            data['products'] = list(reader)[1:]  # Skip header
     
-    # Load prices
-    prices_path = get_file_path(PRICES_FILE)
-    if os.path.exists(prices_path):
-        with open(prices_path, 'r') as f:
-            prices = json.load(f)
+    # Load JSON files
+    for file_type in ['prices', 'history', 'status', 'analytics']:
+        file_path = get_file_path(f'server_{file_type}.json')
+        if os.path.exists(file_path):
+            with open(file_path, 'r') as f:
+                data[file_type] = json.load(f)
     
-    return render_template('index.html', products=products, prices=prices)
+    return render_template('index.html', **data)
 
 
+@app.route('/backup', methods=['POST'])
+def create_server_backup():
+    """Create a backup of all server data files"""
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_dir = os.path.join(DATA_DIR, 'server_backups', f'backup_{timestamp}')
+        os.makedirs(backup_dir, exist_ok=True)
+        
+        # List of files to backup with their proper paths
+        files_to_backup = {
+            'products.csv': PRODUCTS_FILE,
+            'product_prices.json': PRICES_FILE,
+            'quotation_status.json': STATUS_FILE,
+            'quotation_history.json': HISTORY_FILE,
+            'analytics.json': ANALYTICS_FILE
+        }
+        
+        backed_up_files = []
+        for filename, filepath in files_to_backup.items():
+            if os.path.exists(filepath):
+                backup_path = os.path.join(backup_dir, filename)
+                shutil.copy2(filepath, backup_path)
+                backed_up_files.append(filename)
+        
+        if not backed_up_files:
+            raise Exception("No files were backed up - no data files found")
+            
+        update_message = f"Backed up {len(backed_up_files)} files: {', '.join(backed_up_files)}"
+        
+        return jsonify({
+            'status': 'success',
+            'backup_path': backup_dir,
+            'message': update_message,
+            'files_backed_up': backed_up_files,
+            'timestamp': timestamp
+        }), 200
+        
+    except Exception as e:
+        error_message = f"Backup failed: {str(e)}"
+        print(error_message)  # Server-side logging
+        return jsonify({
+            'status': 'error',
+            'message': error_message
+        }), 500
+    
 if __name__ == '__main__':
     # Run the server on port 5001 to avoid conflicts with common development ports
     app.run(host='0.0.0.0', port=5001, debug=True)
