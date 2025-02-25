@@ -21,6 +21,7 @@ PRICES_FILE = os.path.join(DATA_DIR, 'product_prices.json')
 HISTORY_FILE = os.path.join(DATA_DIR, 'quotation_history.json')
 STATUS_FILE = os.path.join(DATA_DIR, 'quotation_status.json')
 ANALYTICS_FILE = os.path.join(DATA_DIR, 'analytics.json')
+DELETIONS_FILE = os.path.join(DATA_DIR, 'deleted_quotes.json')
 DATA_DIR = 'server_data'
 
 
@@ -62,56 +63,12 @@ def handle_products():
     
     if request.method == 'POST':
         try:
-            csv_content = request.get_data(as_text=True).strip()
-            
-            # Ensure content is properly decoded
-            try:
-                csv_content = csv_content.encode('latin-1').decode('utf-8')
-            except:
-                pass  # Keep original if conversion fails
-            
-            print("Raw received content:", repr(csv_content))
-            
-            if not csv_content:
-                return jsonify({'message': 'Empty CSV content received'}), 400
-            
-            try:
-                # Parse CSV with proper quoting
-                f = io.StringIO(csv_content)
-                reader = csv.reader(f, quoting=csv.QUOTE_ALL, escapechar='\\')
-                rows = list(reader)
-                
-                if not rows:
-                    return jsonify({'message': 'No data in CSV content'}), 400
-                
-                header = [col.strip() for col in rows[0]]
-                print("Processed header:", header)
-                
-                # Validate header and content
-                expected_header = ['ID', 'Name', 'Description', 'Photo']
-                if not all(col in header for col in expected_header):
-                    return jsonify({
-                        'message': 'Invalid CSV format',
-                        'details': f'Missing columns: {[col for col in expected_header if col not in header]}',
-                        'received_header': header
-                    }), 400
+            if 'file' in request.files:
+                file = request.files['file']
+                print('File: File; FIle FILE FILE FLE : ', request.files)
+                file.save('server_data/products.csv')
+                return 'OK', 200
 
-                # Save with UTF-8 encoding
-                with open(file_path, 'w', newline='', encoding='utf-8') as f:
-                    writer = csv.writer(f, quoting=csv.QUOTE_ALL, escapechar='\\')
-                    writer.writerows(rows)
-                
-                return jsonify({
-                    'message': 'Products updated successfully',
-                    'rows_processed': len(rows) - 1
-                }), 200
-                
-            except csv.Error as e:
-                return jsonify({
-                    'message': 'CSV parsing error',
-                    'details': str(e),
-                    'content_preview': csv_content[:200]
-                }), 400
                 
         except Exception as e:
             return jsonify({
@@ -142,44 +99,57 @@ def handle_products():
             
         except Exception as e:
             return jsonify({'message': f'Server error: {str(e)}'}), 500
-
 @app.route('/products/<product_id>', methods=['POST'])
 def update_single_product(product_id):
-    """Update a single product by ID"""
+    """Update or create a single product by ID"""
     try:
         # Get the product data from request
         product_data = request.get_json()
+        print(product_data)
         if not product_data:
             return jsonify({'message': 'No product data provided'}), 400
 
         # Load existing products
         products = []
+        header = ['ID', 'Name', 'Description', 'Photo']
         if os.path.exists(PRODUCTS_FILE):
             df = pd.read_csv(PRODUCTS_FILE, quoting=csv.QUOTE_ALL, escapechar='\\', encoding='utf-8')
             products = df.values.tolist()
+        else:
+            # Create new file with header if it doesn't exist
+            df = pd.DataFrame(columns=header)
+            df.to_csv(PRODUCTS_FILE, index=False, quoting=csv.QUOTE_ALL, escapechar='\\', encoding='utf-8')
 
-        # Find and update the product
-        product_updated = False
+        # Check if product exists
+        product_exists = False
         for i, product in enumerate(products):
             if product[0] == product_id:
+                # Update existing product
                 products[i] = [
                     product_id,
                     product_data['name'],
                     product_data['description'],
                     product_data['photo']
                 ]
-                product_updated = True
+                product_exists = True
                 break
 
-        if not product_updated:
-            return jsonify({'message': 'Product not found'}), 404
+        if not product_exists:
+            # Add new product
+            products.append([
+                product_id,
+                product_data['name'],
+                product_data['description'],
+                product_data['photo']
+            ])
+        print("product_data['photo']: ", product_data['photo'])
 
         # Save updated products back to CSV
-        df = pd.DataFrame(products, columns=['ID', 'Name', 'Description', 'Photo'])
+        df = pd.DataFrame(products, columns=header)
         df.to_csv(PRODUCTS_FILE, index=False, quoting=csv.QUOTE_ALL, escapechar='\\', encoding='utf-8')
 
         return jsonify({
-            'message': 'Product updated successfully',
+            'message': 'Product updated successfully' if product_exists else 'Product created successfully',
             'product': {
                 'id': product_id,
                 'name': product_data['name'],
@@ -189,7 +159,7 @@ def update_single_product(product_id):
         }), 200
 
     except Exception as e:
-        return jsonify({'message': f'Error updating product: {str(e)}'}), 500
+        return jsonify({'message': f'Error updating/creating product: {str(e)}'}), 500
     
 # Prices endpoints
 @app.route('/prices', methods=['GET', 'POST'])
@@ -498,6 +468,8 @@ def delete_quote(quote_id):
             'quote_id': quote_id
         }), 500
     
+
+
 # Update debug view to show all files
 @app.route('/debug', methods=['GET'])
 def debug_view():
