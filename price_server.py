@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, send_file
 import json
 import csv
 import os
@@ -6,6 +6,8 @@ from datetime import datetime
 import io
 import pandas as pd
 import shutil
+from io import BytesIO
+import zipfile
 
 app = Flask(__name__, template_folder='.')
 
@@ -22,6 +24,8 @@ HISTORY_FILE = os.path.join(DATA_DIR, 'quotation_history.json')
 STATUS_FILE = os.path.join(DATA_DIR, 'quotation_status.json')
 ANALYTICS_FILE = os.path.join(DATA_DIR, 'analytics.json')
 DELETIONS_FILE = os.path.join(DATA_DIR, 'deleted_quotes.json')
+CATEGORIES_FILE = os.path.join(DATA_DIR, 'categories.json')
+
 DATA_DIR = 'server_data'
 
 
@@ -55,7 +59,177 @@ def handle_json_file(file_name, data=None):
             return {}
         with open(file_path, 'r') as f:
             return json.load(f)
+
+
+
+@app.route('/download_all', methods=['GET'])
+def download_all_files():
+    """Download all server data files as a zip archive"""
+    try:
+        # Create an in-memory zip file
+        memory_file = BytesIO()
+        with zipfile.ZipFile(memory_file, 'w', zipfile.ZIP_DEFLATED) as zf:
+            # List of files to include in the download
+            files_to_download = {
+                'products.csv': PRODUCTS_FILE,
+                'product_prices.json': PRICES_FILE,
+                'quotation_status.json': STATUS_FILE,
+                'quotation_history.json': HISTORY_FILE,
+                'analytics.json': ANALYTICS_FILE,
+                'categories.json': CATEGORIES_FILE,
+                'deleted_quotes.json': DELETIONS_FILE
+            }
+            
+            # Add each file to the zip if it exists
+            for filename, filepath in files_to_download.items():
+                if os.path.exists(filepath):
+                    # Read file content
+                    with open(filepath, 'rb') as f:
+                        file_content = f.read()
+                    # Write to zip with proper filename
+                    zf.writestr(filename, file_content)
+                else:
+                    # Create empty file if it doesn't exist
+                    if filename.endswith('.json'):
+                        zf.writestr(filename, '{}')
+                    elif filename.endswith('.csv'):
+                        zf.writestr(filename, 'ID,Name,Description,Photo,Category\n')
         
+        # Reset file pointer to beginning
+        memory_file.seek(0)
+        
+        # Create timestamp for filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        download_filename = f"quotation_data_{timestamp}.zip"
+        
+        # Send the file
+        return send_file(
+            memory_file,
+            mimetype='application/zip',
+            as_attachment=True,
+            download_name=download_filename
+        )
+        
+    except Exception as e:
+        error_message = f"Download failed: {str(e)}"
+        print(error_message)  # Server-side logging
+        return jsonify({
+            'status': 'error',
+            'message': error_message
+        }), 500
+    
+
+# Add this new route for categories
+@app.route('/categories', methods=['GET', 'POST'])
+def handle_categories():
+    """Handle categories data"""
+    try:
+        if request.method == 'POST':
+            categories_data = request.get_json()
+            if not categories_data:
+                return jsonify({'message': 'No categories data provided'}), 400
+                
+            # Save categories data
+            with open(CATEGORIES_FILE, 'w', encoding='utf-8') as f:
+                json.dump(categories_data, f, indent=2)
+            
+            return jsonify({'message': 'Categories updated successfully'}), 200
+            
+        else:  # GET request
+            if not os.path.exists(CATEGORIES_FILE):
+                # Initialize with default categories if file doesn't exist
+                default_categories = [
+                    {"id": "equipment", "name": "Equipment"},
+                    {"id": "tools", "name": "Tools"},
+                    {"id": "consumables", "name": "Consumables"},
+                    {"id": "other", "name": "Uncategorized"}
+                ]
+                with open(CATEGORIES_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(default_categories, f, indent=2)
+                return jsonify(default_categories), 200
+                
+            # Return categories data
+            with open(CATEGORIES_FILE, 'r', encoding='utf-8') as f:
+                categories = json.load(f)
+            return jsonify(categories), 200
+            
+    except Exception as e:
+        print(f"Error handling categories: {str(e)}")  # Debug print
+        return jsonify({'message': f'Server error: {str(e)}'}), 500
+
+# Add this specific category endpoint for single category operations
+@app.route('/categories/<category_id>', methods=['GET', 'PUT', 'DELETE'])
+def handle_single_category(category_id):
+    """Handle operations on a single category"""
+    try:
+        # Load current categories
+        if not os.path.exists(CATEGORIES_FILE):
+            # Initialize with default categories if file doesn't exist
+            default_categories = [
+                {"id": "equipment", "name": "Equipment"},
+                {"id": "tools", "name": "Tools"},
+                {"id": "consumables", "name": "Consumables"},
+                {"id": "other", "name": "Uncategorized"}
+            ]
+            categories = default_categories
+        else:
+            with open(CATEGORIES_FILE, 'r', encoding='utf-8') as f:
+                categories = json.load(f)
+        
+        if request.method == 'GET':
+            # Find and return the specific category
+            category = next((cat for cat in categories if cat['id'] == category_id), None)
+            if category:
+                return jsonify(category), 200
+            else:
+                return jsonify({'message': 'Category not found'}), 404
+        
+        elif request.method == 'PUT':
+            # Update a category
+            category_data = request.get_json()
+            if not category_data or 'name' not in category_data:
+                return jsonify({'message': 'Invalid category data'}), 400
+                
+            # Find and update category
+            category_found = False
+            for i, cat in enumerate(categories):
+                if cat['id'] == category_id:
+                    categories[i]['name'] = category_data['name']
+                    category_found = True
+                    break
+            
+            if not category_found:
+                # Add new category if not found
+                categories.append({
+                    'id': category_id,
+                    'name': category_data['name']
+                })
+                
+            # Save updated categories
+            with open(CATEGORIES_FILE, 'w', encoding='utf-8') as f:
+                json.dump(categories, f, indent=2)
+                
+            return jsonify({'message': 'Category updated successfully'}), 200
+        
+        elif request.method == 'DELETE':
+            # Remove category with given ID
+            original_len = len(categories)
+            categories = [cat for cat in categories if cat['id'] != category_id]
+            
+            if len(categories) == original_len:
+                return jsonify({'message': 'Category not found'}), 404
+                
+            # Save updated categories
+            with open(CATEGORIES_FILE, 'w', encoding='utf-8') as f:
+                json.dump(categories, f, indent=2)
+                
+            return jsonify({'message': 'Category deleted successfully'}), 200
+            
+    except Exception as e:
+        print(f"Error handling single category: {str(e)}")
+        return jsonify({'message': f'Server error: {str(e)}'}), 500
+
+
 # Products endpoints
 @app.route('/products', methods=['GET', 'POST'])
 def handle_products():
@@ -99,6 +273,7 @@ def handle_products():
             
         except Exception as e:
             return jsonify({'message': f'Server error: {str(e)}'}), 500
+        
 @app.route('/products/<product_id>', methods=['POST'])
 def update_single_product(product_id):
     """Update or create a single product by ID"""
@@ -111,7 +286,7 @@ def update_single_product(product_id):
 
         # Load existing products
         products = []
-        header = ['ID', 'Name', 'Description', 'Photo']
+        header = ['ID', 'Name', 'Description', 'Photo', 'Category']  # Updated to include Category
         if os.path.exists(PRODUCTS_FILE):
             df = pd.read_csv(PRODUCTS_FILE, quoting=csv.QUOTE_ALL, escapechar='\\', encoding='utf-8')
             products = df.values.tolist()
@@ -129,7 +304,8 @@ def update_single_product(product_id):
                     product_id,
                     product_data['name'],
                     product_data['description'],
-                    product_data['photo']
+                    product_data['photo'],
+                    product_data.get('category', 'other')  # Add category field with default 'other'
                 ]
                 product_exists = True
                 break
@@ -140,12 +316,13 @@ def update_single_product(product_id):
                 product_id,
                 product_data['name'],
                 product_data['description'],
-                product_data['photo']
+                product_data['photo'],
+                product_data.get('category', 'other')  # Add category field with default 'other'
             ])
         print("product_data['photo']: ", product_data['photo'])
 
         # Save updated products back to CSV
-        df = pd.DataFrame(products, columns=header)
+        df = pd.DataFrame(products, columns=header)  # Use updated header
         df.to_csv(PRODUCTS_FILE, index=False, quoting=csv.QUOTE_ALL, escapechar='\\', encoding='utf-8')
 
         return jsonify({
@@ -154,7 +331,8 @@ def update_single_product(product_id):
                 'id': product_id,
                 'name': product_data['name'],
                 'description': product_data['description'],
-                'photo': product_data['photo']
+                'photo': product_data['photo'],
+                'category': product_data.get('category', 'other')  # Add category to response
             }
         }), 200
 
@@ -470,7 +648,7 @@ def delete_quote(quote_id):
     
 
 
-# Update debug view to show all files
+# Update debug view to show categories
 @app.route('/debug', methods=['GET'])
 def debug_view():
     data = {
@@ -478,7 +656,8 @@ def debug_view():
         'prices': {},
         'history': {},
         'status': {},
-        'analytics': {}
+        'analytics': {},
+        'categories': []  # Add categories to debug view
     }
     
     # Load products
@@ -488,7 +667,12 @@ def debug_view():
             reader = csv.reader(f, quoting=csv.QUOTE_ALL, escapechar='\\')
             data['products'] = list(reader)[1:]  # Skip header
     
-    # Load JSON files
+    # Load categories
+    if os.path.exists(CATEGORIES_FILE):
+        with open(CATEGORIES_FILE, 'r') as f:
+            data['categories'] = json.load(f)
+    
+    # Load other JSON files
     for file_type in ['prices', 'history', 'status', 'analytics']:
         file_path = get_file_path(f'server_{file_type}.json')
         if os.path.exists(file_path):
@@ -498,6 +682,7 @@ def debug_view():
     return render_template('index.html', **data)
 
 
+# Update the backup function to include categories file
 @app.route('/backup', methods=['POST'])
 def create_server_backup():
     """Create a backup of all server data files"""
@@ -512,7 +697,8 @@ def create_server_backup():
             'product_prices.json': PRICES_FILE,
             'quotation_status.json': STATUS_FILE,
             'quotation_history.json': HISTORY_FILE,
-            'analytics.json': ANALYTICS_FILE
+            'analytics.json': ANALYTICS_FILE,
+            'categories.json': CATEGORIES_FILE  # Add categories file to backup
         }
         
         backed_up_files = []
@@ -542,7 +728,8 @@ def create_server_backup():
             'status': 'error',
             'message': error_message
         }), 500
-    
+
+
 if __name__ == '__main__':
     # Run the server on port 5001 to avoid conflicts with common development ports
     app.run(host='0.0.0.0', port=5001, debug=True)
