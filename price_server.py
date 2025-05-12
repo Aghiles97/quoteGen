@@ -6,8 +6,9 @@ from datetime import datetime
 import io
 import pandas as pd
 import shutil
-from io import BytesIO
 import zipfile
+from io import BytesIO
+from flask import send_file
 
 app = Flask(__name__, template_folder='.')
 
@@ -26,7 +27,6 @@ ANALYTICS_FILE = os.path.join(DATA_DIR, 'analytics.json')
 DELETIONS_FILE = os.path.join(DATA_DIR, 'deleted_quotes.json')
 CATEGORIES_FILE = os.path.join(DATA_DIR, 'categories.json')
 
-DATA_DIR = 'server_data'
 
 
 # Ensure data directory exists
@@ -731,5 +731,13 @@ def create_server_backup():
 
 
 if __name__ == '__main__':
-    # Run the server on port 5001 to avoid conflicts with common development ports
-    app.run(host='0.0.0.0', port=5001, debug=True)
+    # Check if running in production environment
+    is_production = os.environ.get('ENVIRONMENT') == 'production'
+    
+    if is_production:
+        # Production settings - no debug, use PORT from environment
+        port = int(os.environ.get('PORT', 5001))
+        app.run(host='0.0.0.0', port=port, debug=False)
+    else:
+        # Development settings
+        app.run(host='0.0.0.0', port=5001, debug=True)
